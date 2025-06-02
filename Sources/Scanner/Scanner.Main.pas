@@ -829,16 +829,31 @@ begin
     instrument_multiplier := aData^.Multiplier;
     if instrument_multiplier = 0.0 then instrument_multiplier := 1.0; // Default multiplier to 1 if 0
 
-    // Placeholder for account equity
-    // TODO: Implement FMonitor.GetNetLiquidation or similar method
-    account_equity := 100000.0; // Placeholder value
-    // if Assigned(FMonitor) then account_equity := FMonitor.GetNetLiquidation; // Example call
-
-    // Placeholder for stop-loss price (only needed for qmFixedRiskPercentEquity)
-    stop_loss_price := 0.0; // Default to 0, will be calculated if mode requires it
     entry_price := LastPrice; // Entry price is current LastPrice
-
     calc_quantity := 0; // Initialize calculated quantity
+    account_equity := 0.0; // Initialize
+    stop_loss_price := 0.0; // Initialize
+
+    // Fetch Account Equity for relevant modes
+    if active_mode in [TQuantityMode.qmPercentOfEquity, TQuantityMode.qmFixedRiskPercentEquity] then
+    begin
+      if Assigned(FMonitor) then
+        account_equity := FMonitor.GetNetLiquidation
+      else
+      begin
+        account_equity := 0.0;
+        TPublishers.LogPublisher.Write([ltLogWriter], ddError, Self, log_prefix + 'FMonitor not assigned, cannot get account equity.');
+      end;
+
+      if account_equity <= 0.0 then
+      begin
+        TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, log_prefix + 'Account equity is zero or negative (' + FloatToStr(account_equity) + '). Cannot calculate quantity for percentage-based mode.');
+        calc_quantity := 0;
+        // Skip further calculation for these modes if equity is not positive
+        if active_mode = TQuantityMode.qmPercentOfEquity then goto ApplyConstraints;
+        if active_mode = TQuantityMode.qmFixedRiskPercentEquity then goto ApplyConstraints;
+      end;
+    end;
 
     TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix +
       'Mode=' + active_mode.ToString +
@@ -848,7 +863,7 @@ begin
       ', LastPrice=' + FloatToStr(LastPrice) +
       ', LastExch=' + FloatToStr(LastExch) +
       ', Multiplier=' + FloatToStr(instrument_multiplier) +
-      ', AccountEquity(Placeholder)=' + FloatToStr(account_equity)
+      ', AccountEquity=' + FloatToStr(account_equity)
     );
 
     case active_mode of

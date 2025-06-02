@@ -42,6 +42,8 @@ type
     procedure UnsubscribeChildNNFeed(aNode: PVirtualNode);
     procedure UpdateAlgos(const aNode: PVirtualNode);
     procedure UpdateCondition(const aNode: PVirtualNode);
+    function GetNetLiquidation: Double;
+    function GetOrderTemplateStopLoss(orderTemplateId: Integer; entryPrice: Double; orderAction: TIABAction; instrumentMultiplier: Double): Double;
   end;
 
 implementation

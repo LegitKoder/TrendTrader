@@ -596,6 +596,8 @@ type
     procedure CheckRepetitive(const aNode: PVirtualNode);
     procedure Initialize;
     procedure Deinitialize;
+    function GetNetLiquidation: Double;
+    function GetOrderTemplateStopLoss(orderTemplateId: Integer; entryPrice: Double; orderAction: TIABAction; instrumentMultiplier: Double): Double;
   end;
 
 var
@@ -8683,6 +8685,230 @@ end;
 procedure TfrmMonitor.aExportToExcelExecute(Sender: TObject);
 begin
   TExcelExportHelper.ExportToExcel(vstMonitor, 'Monitor');
+end;
+
+function TfrmMonitor.GetNetLiquidation: Double;
+var
+  AccountValueItem: string;
+  AccountItems: TArray<string>;
+  SelectedAccount: string;
+  i: Integer;
+begin
+  Result := 0.0; // Default value if not found or error
+  SelectedAccount := '';
+
+  // Determine the currently selected account (e.g., from cbAccounts)
+  if Assigned(cbAccounts) and (cbAccounts.ItemIndex > -1) then
+    SelectedAccount := cbAccounts.Items[cbAccounts.ItemIndex]
+  else if Assigned(IABClient) and (IABClient.AccountValues.Count > 0) then
+  begin
+    // Fallback: Try to find a primary account or the first one if not explicitly selected
+    // This logic might need refinement based on how primary accounts are handled.
+    for AccountValueItem in IABClient.AccountValues do
+    begin
+      AccountItems := AccountValueItem.Split([' ']); // Format: Key Value Currency Account
+      if (Length(AccountItems) >= 4) then // Ensure it's a full account line
+      begin
+        SelectedAccount := AccountItems[3]; // Assuming Account is the 4th item
+        Break;
+      end;
+    end;
+  end;
+
+  if SelectedAccount.IsEmpty then
+  begin
+    TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, 'GetNetLiquidation', 'No account selected or available to determine NetLiquidation.');
+    Exit;
+  end;
+
+  // Iterate through IABClient.AccountValues to find NetLiquidation for the SelectedAccount
+  // The format is typically "Key Value Currency Account"
+  // Example: "NetLiquidation 100000.00 USD U12345"
+  if Assigned(IABClient) then
+  begin
+    for i := 0 to IABClient.AccountValues.Count - 1 do
+    begin
+      AccountValueItem := IABClient.AccountValues[i];
+      AccountItems := AccountValueItem.Split([' ']);
+      if (Length(AccountItems) >= 4) then // Key Value Currency Account
+      begin
+        if (UpperCase(AccountItems[0]) = 'NETLIQUIDATION') and (AccountItems[3] = SelectedAccount) then
+        begin
+          if TryStrToFloat(AccountItems[1], Result) then
+          begin
+            TPublishers.LogPublisher.Write([ltLogWriter], ddText, Self, 'GetNetLiquidation', 'Found NetLiquidation: ' + FloatToStr(Result) + ' for account ' + SelectedAccount);
+            Exit; // Found
+          end
+          else
+          begin
+            TPublishers.LogPublisher.Write([ltLogWriter], ddError, Self, 'GetNetLiquidation', 'Failed to convert NetLiquidation value to float: ' + AccountItems[1] + ' for account ' + SelectedAccount);
+            Result := 0.0; // Reset result on conversion error
+            Exit;
+          end;
+        end;
+      end;
+    end;
+    TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, 'GetNetLiquidation', 'NetLiquidation not found for account: ' + SelectedAccount);
+  end
+  else
+  begin
+    TPublishers.LogPublisher.Write([ltLogWriter], ddError, Self, 'GetNetLiquidation', 'IABClient not assigned.');
+  end;
+end;
+
+function TfrmMonitor.GetOrderTemplateStopLoss(orderTemplateId: Integer; entryPrice: Double; orderAction: TIABAction; instrumentMultiplier: Double): Double;
+var
+  OrderDocNode: PVirtualNode;
+  OrderDocData: PTreeData;
+  PrimaryOrder: TOrderIBDoc; // Assuming TOrderIBDoc is the most relevant for stop details
+  stopPrice: Double;
+  sMultiplierOrMinTick: string; // Renamed for clarity, as it's used for MinTick
+  effectiveMultiplier: Double;
+  tickSize: Double;
+  marketRuleId: string;
+  tempTree: TVirtualStringTree;
+begin
+  Result := 0.0; // Default: no stop-loss or not determinable
+  stopPrice := 0.0;
+
+  if orderTemplateId <= 0 then
+  begin
+    TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, 'GetOrderTemplateStopLoss', 'Invalid orderTemplateId: ' + orderTemplateId.ToString);
+    Exit;
+  end;
+
+  tempTree := TVirtualStringTree.Create(nil); // No owner, will be freed.
+  tempTree.NodeDataSize := SizeOf(TTreeData);
+  try
+    // Load the entire template structure. This will create nodes with TTreeData.
+    OrderDocNode := TTreeDocument.LoadOrderTemplateRelationTree(orderTemplateId, -1, tempTree, nil, nil, nil);
+
+    if Assigned(OrderDocNode) then
+    begin
+      OrderDocData := tempTree.GetNodeData(OrderDocNode); // Get data from the node in the temporary tree
+      if Assigned(OrderDocData) and (OrderDocData^.DocType = ntOrder) and (OrderDocData^.OrderDoc is TOrderIBDoc) then
+      begin
+        PrimaryOrder := TOrderIBDoc(OrderDocData^.OrderDoc);
+
+        effectiveMultiplier := instrumentMultiplier;
+        if effectiveMultiplier <= 0.0 then effectiveMultiplier := 1.0; // Default multiplier
+
+        marketRuleId := PrimaryOrder.MarketList;
+        tickSize := 0.0001; // Default tick size
+
+        if SokidList.ContainsKey(PrimaryOrder.Id) then
+        begin
+          if not SokidList.Items[PrimaryOrder.Id].MarketRuleIds.IsEmpty then
+            marketRuleId := SokidList.Items[PrimaryOrder.Id].MarketRuleIds;
+          sMultiplierOrMinTick := SokidList.Items[PrimaryOrder.Id].MinimumTick;
+          if not TryStrToFloat(sMultiplierOrMinTick, tickSize) or (tickSize = 0.0) then
+              tickSize := 0.0001; // Default if not found or zero
+        end;
+
+        if Assigned(IABClient) and Assigned(IABClient.MarketRuleList) then
+           tickSize := IABClient.MarketRuleList.GetMinTick(entryPrice, marketRuleId, tickSize)
+        else
+           TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, 'GetOrderTemplateStopLoss', 'IABClient or IABClient.MarketRuleList not assigned. Using default/Sokid tickSize: ' + FloatToStr(tickSize));
+
+        case PrimaryOrder.OrderType of
+          TIABOrderType.otStop, TIABOrderType.otStopLimit:
+            stopPrice := PrimaryOrder.AuxPrice;
+
+          TIABOrderType.otTrail:
+            begin
+              if PrimaryOrder.RateType = TRateType.rtValue then // AuxPrice is offset amount
+              begin
+                if orderAction = TIABAction.iabBuy then
+                  stopPrice := entryPrice - PrimaryOrder.AuxPrice
+                else // iabSell or other
+                  stopPrice := entryPrice + PrimaryOrder.AuxPrice;
+              end
+              else // RateType = rtPercent, TrailingPercent is used
+              begin
+                if orderAction = TIABAction.iabBuy then
+                  stopPrice := entryPrice * (1 - (PrimaryOrder.TrailingPercent / 100.0))
+                else // iabSell or other
+                  stopPrice := entryPrice * (1 + (PrimaryOrder.TrailingPercent / 100.0));
+              end;
+              // Apply TrailStopPrice as a floor/cap if it's set
+              if PrimaryOrder.TrailStopPrice > 0 then
+              begin
+                if orderAction = TIABAction.iabBuy then
+                  stopPrice := Max(stopPrice, PrimaryOrder.TrailStopPrice)
+                else // iabSell or other
+                  stopPrice := Min(stopPrice, PrimaryOrder.TrailStopPrice);
+              end;
+            end;
+
+          TIABOrderType.otTrailLimit:
+            begin
+              if PrimaryOrder.RateType = TRateType.rtValue then
+              begin
+                if orderAction = TIABAction.iabBuy then
+                  stopPrice := entryPrice - PrimaryOrder.AuxPrice
+                else // iabSell or other
+                  stopPrice := entryPrice + PrimaryOrder.AuxPrice;
+              end
+              else // RateType = rtPercent
+              begin
+                if orderAction = TIABAction.iabBuy then
+                  stopPrice := entryPrice * (1 - (PrimaryOrder.TrailingPercent / 100.0))
+                else // iabSell or other
+                  stopPrice := entryPrice * (1 + (PrimaryOrder.TrailingPercent / 100.0));
+              end;
+              if PrimaryOrder.TrailStopPrice > 0 then // Initial actual stop price if provided
+              begin
+                if orderAction = TIABAction.iabBuy then
+                  stopPrice := Max(stopPrice, PrimaryOrder.TrailStopPrice)
+                else // iabSell or other
+                  stopPrice := Min(stopPrice, PrimaryOrder.TrailStopPrice);
+              end;
+            end
+          else
+            stopPrice := 0.0; // No explicit stop defined by these order types
+        end;
+
+        if stopPrice > 0.0 then
+        begin
+           if Assigned(IABClient) and Assigned(IABClient.MarketRuleList) then
+               Result := IABClient.MarketRuleList.RoundToMinTick(stopPrice, marketRuleId, tickSize)
+           else
+               Result := stopPrice; // Rounding might be incorrect if MarketRuleList is nil
+        end else
+           Result := 0.0;
+
+        TPublishers.LogPublisher.Write([ltLogWriter], ddText, Self, 'GetOrderTemplateStopLoss',
+          'TemplateID: ' + orderTemplateId.ToString +
+          ', Entry: ' + FloatToStr(entryPrice) +
+          ', Action: ' + orderAction.ToString +
+          ', MultiplierArg: ' + FloatToStr(instrumentMultiplier) + // Log passed multiplier
+          ', EffectiveMultiplier: ' + FloatToStr(effectiveMultiplier) + // Log used multiplier
+          ', OrderType: ' + PrimaryOrder.OrderType.ToString +
+          ', AuxPrice: ' + FloatToStr(PrimaryOrder.AuxPrice) +
+          ', TrailStopPrice: ' + FloatToStr(PrimaryOrder.TrailStopPrice) +
+          ', TrailingPercent: ' + FloatToStr(PrimaryOrder.TrailingPercent) +
+          ', RateType: ' + Ord(PrimaryOrder.RateType).ToString + // Log RateType
+          ', InitialCalcStop: ' + FloatToStr(stopPrice) + // Log stop before rounding
+          ', FinalRoundedStop: ' + FloatToStr(Result) +
+          ', TickSizeUsed: ' + FloatToStr(tickSize) +
+          ', MarketRuleID: ' + marketRuleId);
+      end
+      else
+        TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, 'GetOrderTemplateStopLoss', 'Order template ' + orderTemplateId.ToString + ' does not have a TOrderIBDoc at its root, or data/OrderDoc is not assigned.');
+    end
+    else
+      TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, Self, 'GetOrderTemplateStopLoss', 'Could not load order template structure with ID: ' + orderTemplateId.ToString);
+  finally
+    // Free the temporary tree and its nodes.
+    // Since nodes are allocated by the tree with NodeDataSize, Clear should free associated data if GetNodeData doesn't transfer ownership.
+    // TTreeDocument.LoadOrderTemplateRelationTree might populate the tree.
+    // Proper cleanup of TTreeData within the temporary tree needs to be ensured by how TTreeDocument manages it or by iterating and freeing if necessary.
+    // Assuming TVirtualStringTree.Clear handles freeing node data if NodeDataSize was set and nodes were added internally.
+    // If TTreeDocument.LoadOrderTemplateRelationTree implies complex TTreeData that isn't auto-freed by Clear, manual iteration and freeing would be needed here.
+    // For now, relying on Clear and Free.
+    tempTree.Clear;
+    FreeAndNil(tempTree);
+  end;
 end;
 
 end.
