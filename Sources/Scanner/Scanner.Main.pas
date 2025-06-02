@@ -18,7 +18,7 @@ uses
   IABFunctions.MarketData, AutoTrades.Types, DaModule.Utils, VirtualTrees.Helper, Global.Resources, Vcl.Themes,
   Monitor.Info, Publishers, System.Notification, Chart.Trade, Vcl.NumberBox, IABFunctions.Helpers, System.Types,
   MonitorTree.Helper, Scanner.GradientColumn, VirtualTrees.Types, FireDAC.Comp.Client, FireDAC.Stan.Param,
-  FireDAC.Comp.DataSet;
+  FireDAC.Comp.DataSet, Quantities.Types;
 {$ENDREGION}
 
 type
@@ -743,16 +743,42 @@ procedure TfrmScannerMain.PreExecutionEvaluation(const aData: PInstrumentData);
 var
   LastPrice: Double;
   LastExch: Double;
-  Quantity: Integer;
+  calc_quantity: Integer; // Renamed from Quantity
   Currency: string;
   Info: string;
-  OrderAmount: Double;
+  original_autotrade_monetary_amount: Double; // Renamed from OrderAmount
   PrecSettings: TPrecautionarySettingTypes;
+
+  // New variables for dynamic quantity calculation
+  active_mode: TQuantityMode;
+  active_risk_percent_value: Double;
+  quantity_order_amount: Integer; // From TQuantity.OrderAmount (shares for qmFixedShares)
+
+  account_equity: Double;
+  entry_price: Double;
+  stop_loss_price: Double;
+  instrument_multiplier: Double;
+  // OrderAction: TIABAction; // To be determined for stop loss calculation
+
+  monetary_amount_for_trade: Double;
+  risk_per_share: Double;
+  target_monetary_risk: Double;
+  calculated_monetary_amount: Double;
+  log_prefix: string;
+
 begin
+  log_prefix := 'PreExecutionEvaluation (Instrument: ' + aData^.Symbol + ', ID: ' + aData^.Id.ToString + '): ';
+
+  // Initialize new sizing configuration variables
+  active_mode := FAutoTradeInfo.Quantity.Mode;
+  active_risk_percent_value := FAutoTradeInfo.Quantity.RiskOrPercentValue;
+  original_autotrade_monetary_amount := FAutoTradeInfo.OrderAmount; // This is the monetary amount from AutoTradeInfo
+  quantity_order_amount := FAutoTradeInfo.Quantity.OrderAmount; // This is the integer amount from TQuantity, used for FixedShares mode
+
   if aData^.IsCriteria and
     (FAutoTradeInfo.Active and (not aData^.IsLocked {or FAutoTradeInfo.AllowSendDuplicateOrder})) and
-    (FAutoTradeInfo.OrderAmount > 0) and
-    (FAutoTradeInfo.TotalOrderAmount > 0) and
+    // (FAutoTradeInfo.OrderAmount > 0) and // Original check, may need adjustment based on mode
+    // (FAutoTradeInfo.TotalOrderAmount > 0) and // Original check, may need adjustment based on mode
     {(FAutoTradeInfo.OrderGroupId > 0) and}
     (CreatedOrdersCount < FAutoTradeInfo.MaxNumberOrder) then
   begin
@@ -762,130 +788,325 @@ begin
             ', LocalSymbol=' + aData^.LocalSymbol +
             ', Currency=' + aData^.Currency +
             ', Multiplier=' + aData^.Multiplier.ToString;
-//    TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', Info);
+    TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'Initial Info: ' + Info);
+
     LastPrice := TMonitorLists.PriceCache.GetLastPrice(aData^.Id, ttLast);
     if (LastPrice = 0) then
     begin
-      TIABMarket.RequestMarketData(aData.Id);
-      Sleep(50);
-      LastPrice := TMonitorLists.PriceCache.GetLastPrice(aData^.Id, ttClose);
+      TIABMarket.RequestMarketData(aData^.Id); // Request data if not available
+      Sleep(50); // Brief pause to allow data retrieval
+      LastPrice := TMonitorLists.PriceCache.GetLastPrice(aData^.Id, ttClose); // Try close price if last is still 0
     end;
-    if (LastPrice = 0) and SokidList.ContainsKey(aData^.Id) then
+    if (LastPrice = 0) and SokidList.ContainsKey(aData^.Id) then // Fallback to SokidList
       LastPrice := SokidList.Items[aData^.Id].LastPrice;
+
     if (LastPrice = 0) then
     begin
-      aData^.Description := 'Not passed - No Feed';
+      aData^.Description := 'Not passed - No Feed (LastPrice is 0)';
       aData^.IsLocked := True;
       ShowNotification(aData);
-      TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddError, 'PreExecutionEvaluation', aData^.Description + ', ' + Info);
+      TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddError, Self, 'PreExecutionEvaluation', log_prefix + aData^.Description);
+      Exit; // Exit if no price can be determined
+    end;
+
+    Currency := aData^.Currency;
+    LastExch := 1.0; // Default to 1.0 if currencies are the same
+    if Currency.IsEmpty then // Ensure currency is available
+      Currency := SokidList.GetItem(aData^.Id).Currency;
+
+    if (Currency <> FAutoTradeInfo.OrderCurrency) then
+      LastExch := TMonitorLists.CurrencyCache.GetLastExchange(FAutoTradeInfo.OrderCurrency, Currency);
+
+    if (LastExch <= 0) then
+    begin
+      aData^.Description := 'Not passed - No Exchange Rate from ' + FAutoTradeInfo.OrderCurrency + ' to ' + Currency;
+      aData^.IsLocked := True;
+      ShowNotification(aData);
+      TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddError, Self, 'PreExecutionEvaluation', log_prefix + aData^.Description);
+      Exit; // Exit if no exchange rate
+    end;
+
+    instrument_multiplier := aData^.Multiplier;
+    if instrument_multiplier = 0.0 then instrument_multiplier := 1.0; // Default multiplier to 1 if 0
+
+    // Placeholder for account equity
+    // TODO: Implement FMonitor.GetNetLiquidation or similar method
+    account_equity := 100000.0; // Placeholder value
+    // if Assigned(FMonitor) then account_equity := FMonitor.GetNetLiquidation; // Example call
+
+    // Placeholder for stop-loss price (only needed for qmFixedRiskPercentEquity)
+    stop_loss_price := 0.0; // Default to 0, will be calculated if mode requires it
+    entry_price := LastPrice; // Entry price is current LastPrice
+
+    calc_quantity := 0; // Initialize calculated quantity
+
+    TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix +
+      'Mode=' + active_mode.ToString +
+      ', RiskOrPercentValue=' + FloatToStr(active_risk_percent_value) +
+      ', AutoTradeOrderAmount=' + FloatToStr(original_autotrade_monetary_amount) +
+      ', QuantityOrderAmount=' + IntToStr(quantity_order_amount) +
+      ', LastPrice=' + FloatToStr(LastPrice) +
+      ', LastExch=' + FloatToStr(LastExch) +
+      ', Multiplier=' + FloatToStr(instrument_multiplier) +
+      ', AccountEquity(Placeholder)=' + FloatToStr(account_equity)
+    );
+
+    case active_mode of
+      TQuantityMode.qmFixedShares:
+      begin
+        calc_quantity := quantity_order_amount; // From TQuantity.OrderAmount
+        TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'qmFixedShares: calc_quantity = ' + IntToStr(calc_quantity));
+      end;
+
+      TQuantityMode.qmFixedMonetaryAmount:
+      begin
+        monetary_amount_for_trade := original_autotrade_monetary_amount; // From TAutoTradeInfo.OrderAmount
+        if (LastPrice > 0) and (LastExch > 0) then
+        begin
+          calc_quantity := Trunc((monetary_amount_for_trade * LastExch) / (LastPrice * instrument_multiplier));
+          TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'qmFixedMonetaryAmount: monetary_amount_for_trade=' + FloatToStr(monetary_amount_for_trade) + ', calc_quantity=' + IntToStr(calc_quantity));
+        end
+        else
+          TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmFixedMonetaryAmount: LastPrice or LastExch is zero. Cannot calculate quantity.');
+      end;
+
+      TQuantityMode.qmPercentOfEquity:
+      begin
+        if account_equity > 0 then
+        begin
+          calculated_monetary_amount := account_equity * (active_risk_percent_value / 100.0);
+          if (LastPrice > 0) and (LastExch > 0) then
+          begin
+            calc_quantity := Trunc((calculated_monetary_amount * LastExch) / (LastPrice * instrument_multiplier));
+            TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'qmPercentOfEquity: account_equity=' + FloatToStr(account_equity) + ', active_risk_percent_value=' + FloatToStr(active_risk_percent_value) + ', calculated_monetary_amount=' + FloatToStr(calculated_monetary_amount) + ', calc_quantity=' + IntToStr(calc_quantity));
+          end
+          else
+            TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmPercentOfEquity: LastPrice or LastExch is zero. Cannot calculate quantity.');
+        end
+        else
+          TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmPercentOfEquity: Account equity is zero or negative. Cannot calculate quantity.');
+      end;
+
+      TQuantityMode.qmFixedRiskPercentEquity:
+      begin
+        // TODO: Get stop_loss_price via FMonitor.GetOrderTemplateStopLoss(FAutoTradeInfo.OrderTemplate.RecordId, entry_price, orderActionForStopCalc)
+        //       OrderAction needs to be determined. For example:
+        //         var orderActionForStopCalc: TIABAction;
+        //         if Assigned(FAutoTradeInfo.Candidate) and (FAutoTradeInfo.Candidate.MotherOrderAction <> iabNone) then
+        //           orderActionForStopCalc := FAutoTradeInfo.Candidate.MotherOrderAction
+        //         else if Assigned(FAutoTradeInfo.OrderTemplate) and (FAutoTradeInfo.OrderTemplate.OrderAction <> iabNone) then
+        //           orderActionForStopCalc := FAutoTradeInfo.OrderTemplate.OrderAction // Or derive from OrderTemplate's main order
+        //         else
+        //           orderActionForStopCalc := iabBuy; // Fallback, but ideally should be context-aware (long/short)
+        //
+        //         if Assigned(FMonitor) then
+        //           stop_loss_price := FMonitor.GetOrderTemplateStopLoss(FAutoTradeInfo.OrderTemplate.RecordId, entry_price, orderActionForStopCalc);
+        //         else
+        //           stop_loss_price := 0.0; // Ensure it's 0 if FMonitor is nil
+        stop_loss_price := 0.0; // Placeholder - REMOVE ONCE FMonitor.GetOrderTemplateStopLoss IS IMPLEMENTED & OrderAction determined
+
+        TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'qmFixedRiskPercentEquity: entry_price=' + FloatToStr(entry_price) + ', stop_loss_price(Placeholder)=' + FloatToStr(stop_loss_price) + ', account_equity=' + FloatToStr(account_equity) + ', active_risk_percent_value=' + FloatToStr(active_risk_percent_value));
+
+        if stop_loss_price = 0.0 then // Safety if stop-loss couldn't be determined or is explicitly zero
+        begin
+          TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddWarning, Self, 'PreExecutionEvaluation', log_prefix + 'Warning: Stop-loss price is 0 for Fixed Risk position sizing. Order quantity is 0.');
+          calc_quantity := 0;
+        end
+        else if (account_equity > 0) and (entry_price > 0) then
+        begin
+          risk_per_share := Abs(entry_price - stop_loss_price);
+          // The risk_per_share should already be in the instrument's currency.
+          // If the instrument_multiplier represents contracts (e.g., options, futures), it's applied here.
+          // For stocks, instrument_multiplier is typically 1.
+          risk_per_share := risk_per_share * instrument_multiplier;
+
+          if risk_per_share > 0.00001 then // Avoid division by zero or tiny risk
+          begin
+            target_monetary_risk := account_equity * (active_risk_percent_value / 100.0);
+            // target_monetary_risk is in account currency. risk_per_share needs to be converted to account currency if different.
+            // Assuming risk_per_share is in instrument's currency, convert it using LastExch.
+            // If FAutoTradeInfo.OrderCurrency is the account currency, and instrument currency is different:
+            // target_monetary_risk must be compared against (risk_per_share / LastExch) if LastExch converts OrderCurrency TO instrument currency
+            // OR target_monetary_risk must be compared against (risk_per_share * LastExch) if LastExch converts instrument currency TO OrderCurrency.
+            // Given: LastExch := TMonitorLists.CurrencyCache.GetLastExchange(FAutoTradeInfo.OrderCurrency, Currency);
+            // This means LastExch converts FAutoTradeInfo.OrderCurrency TO Instrument's Currency.
+            // So, (target_monetary_risk * LastExch) is target risk in instrument's currency.
+            // calc_quantity := Trunc((target_monetary_risk * LastExch) / risk_per_share);
+            // OR, convert risk_per_share to account currency: risk_per_share_in_acct_ccy = risk_per_share / LastExch
+            // calc_quantity := Trunc(target_monetary_risk / (risk_per_share / LastExch))
+            // which simplifies to calc_quantity := Trunc((target_monetary_risk * LastExch) / risk_per_share);
+
+            // Let's assume target_monetary_risk is in the FAutoTradeInfo.OrderCurrency (account base currency).
+            // risk_per_share is in the instrument's currency.
+            // We need to convert risk_per_share to FAutoTradeInfo.OrderCurrency.
+            // LastExch converts FAutoTradeInfo.OrderCurrency TO instrument's currency.
+            // So, risk_per_share_in_account_currency = risk_per_share / LastExch.
+            if LastExch > 0 then
+            begin
+              risk_per_share := risk_per_share / LastExch; // Now risk_per_share is in account currency
+              if risk_per_share > 0.00001 then // Re-check after conversion
+                 calc_quantity := Trunc(target_monetary_risk / risk_per_share)
+              else
+                TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmFixedRiskPercentEquity: Risk per share in account currency is zero or too small after conversion. Cannot calculate quantity.');
+            end
+            else
+               TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmFixedRiskPercentEquity: LastExch is zero. Cannot convert risk per share to account currency.');
+
+            TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'qmFixedRiskPercentEquity: risk_per_share_original=' + FloatToStr(Abs(entry_price - stop_loss_price) * instrument_multiplier) + ', risk_per_share_converted_to_acct_ccy=' + FloatToStr(risk_per_share) + ', target_monetary_risk=' + FloatToStr(target_monetary_risk) + ', calc_quantity=' + IntToStr(calc_quantity));
+          end
+          else
+            TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmFixedRiskPercentEquity: Risk per share is zero or too small. Cannot calculate quantity.');
+        end
+        else
+          TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'qmFixedRiskPercentEquity: Account equity, entry price, or stop loss price is zero. Cannot calculate quantity.');
+      end;
+    end; // End Case
+
+    // Apply Constraints
+    TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'Before constraints: calc_quantity=' + IntToStr(calc_quantity));
+
+    // 1. Constraint: FAutoTradeInfo.Quantity.TotalOrderAmount (Integer cap, primarily for qmFixedShares)
+    if (active_mode = TQuantityMode.qmFixedShares) and (FAutoTradeInfo.Quantity.TotalOrderAmount > 0) then
+    begin
+      if calc_quantity > FAutoTradeInfo.Quantity.TotalOrderAmount then
+      begin
+        calc_quantity := FAutoTradeInfo.Quantity.TotalOrderAmount;
+        TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'Quantity capped by FAutoTradeInfo.Quantity.TotalOrderAmount (FixedShares Cap). New calc_quantity=' + IntToStr(calc_quantity));
+      end;
+    end;
+
+    // 2. Constraint: FAutoTradeInfo.TotalOrderAmount (Overall monetary cap from AutoTradeInfo settings)
+    // This is a monetary cap. Value of current calc_quantity in FAutoTradeInfo.OrderCurrency:
+    // (calc_quantity * LastPrice * instrument_multiplier) / LastExch
+    if (FAutoTradeInfo.TotalOrderAmount > 0) then
+    begin
+      if (calc_quantity > 0) and (LastPrice > 0) and (instrument_multiplier > 0) and (LastExch > 0) then
+      begin
+        monetary_amount_for_trade := (calc_quantity * LastPrice * instrument_multiplier) / LastExch; // Cost in account currency
+        if monetary_amount_for_trade > FAutoTradeInfo.TotalOrderAmount then
+        begin
+          // Adjust calc_quantity to not exceed FAutoTradeInfo.TotalOrderAmount
+          calc_quantity := Trunc((FAutoTradeInfo.TotalOrderAmount * LastExch) / (LastPrice * instrument_multiplier));
+          TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'Quantity capped by FAutoTradeInfo.TotalOrderAmount (Monetary Cap). New calc_quantity=' + IntToStr(calc_quantity));
+        end;
+      end;
+    end;
+
+    // Re-check if calc_quantity became zero after monetary cap
+    if (calc_quantity <= 0) then
+    begin
+       TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'calc_quantity became <= 0 after applying TotalOrderAmount monetary cap. Current calc_quantity=' + IntToStr(calc_quantity));
+       // No trade if quantity is zero. The final check below will handle this.
+    end;
+
+    // 3. Constraint: Precautionary Settings (Applied only if quantity > 0)
+    if (calc_quantity > 0) and (LastPrice > 0) then // LastPrice check for safety, though should be >0 if we reached here
+    begin
+      PrecSettings := TOrderUtils.CheckPrecautionarySettings(aData^.SecurityType, calc_quantity, LastPrice);
+      for var PrecSetting in PrecSettings do
+      begin
+        TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddWarning, Self, 'PreExecutionEvaluation', log_prefix + 'Applying PrecautionarySetting: ' + PrecSetting.ToString);
+        case PrecSetting of
+          psAlgorithmTotalValueLimit, psNumberOfTicks, psPercentage, psTotalValueLimit, psAlgorithmSizeLimit:
+            { These might adjust quantity or flag, current code does not show adjustment for these specific flags.
+              If they do adjust quantity, it should be reflected back to calc_quantity.
+              For now, assuming they are checks that might lead to psMaxAllowedPrice/psMinAllowedPrice or handled elsewhere. }
+            TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'Precautionary setting ' + PrecSetting.ToString + ' identified, but no quantity adjustment logic implemented for it here.');
+            ;
+          psOrderQuantityMax:
+            if General.PrecautionarySettings[aData^.SecurityType].Contains(psOrderQuantityMax) then
+            begin
+              if calc_quantity > Trunc(General.PrecautionarySettings[aData^.SecurityType][psOrderQuantityMax]) then
+              begin
+                TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'Quantity capped by psOrderQuantityMax. Old=' + IntToStr(calc_quantity) + ', New=' + Trunc(General.PrecautionarySettings[aData^.SecurityType][psOrderQuantityMax]).ToString);
+                calc_quantity := Trunc(General.PrecautionarySettings[aData^.SecurityType][psOrderQuantityMax]);
+              end;
+            end
+            else
+              TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', log_prefix + 'psOrderQuantityMax setting not found for SecurityType: ' + Ord(aData^.SecurityType).ToString);
+            ;
+          psMaxAllowedPrice, psMinAllowedPrice:
+            begin
+              aData^.Description := 'Not passed - Precautionary: ' + PrecSetting.ToString;
+              aData^.IsLocked := True;
+              ShowNotification(aData, PrecSetting.ToString);
+              TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddError, Self, 'PreExecutionEvaluation', log_prefix + aData^.Description);
+              Exit; // Critical issue, exit.
+            end;
+        end;
+      end;
+    end;
+
+    TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'After constraints: calc_quantity=' + IntToStr(calc_quantity));
+
+    // Decrement FAutoTradeInfo.TotalOrderAmount (monetary) *after* all quantity calculations and caps.
+    // This should only happen if a trade is actually made (calc_quantity > 0).
+    if (calc_quantity > 0) and (LastPrice > 0) and (instrument_multiplier > 0) and (LastExch > 0) then
+    begin
+        monetary_amount_for_trade := (calc_quantity * LastPrice * instrument_multiplier) / LastExch; // Cost in account currency
+        Dec(FAutoTradeInfo.TotalOrderAmount, Trunc(monetary_amount_for_trade));
+        TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'Decremented FAutoTradeInfo.TotalOrderAmount by ' + Trunc(monetary_amount_for_trade).ToString + '. New TotalOrderAmount=' + FAutoTradeInfo.TotalOrderAmount.ToString);
+    end;
+
+    // Final check on calc_quantity before creating order structure
+    if (calc_quantity <= 0) then
+    begin
+      aData^.Description := 'Not passed - Calculated quantity is zero or negative.';
+      aData^.IsLocked := True; // Lock to prevent retrying if quantity is legitimately zero
+      ShowNotification(aData, 'Calculated quantity is zero.');
+      TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddWarning, Self, 'PreExecutionEvaluation', log_prefix + aData^.Description + ' Final calc_quantity=' + IntToStr(calc_quantity));
+      Exit; // Exit if quantity is zero or less
     end
     else
     begin
-      Currency := aData^.Currency;
-      LastExch := 1;
-      if Currency.IsEmpty then
-        Currency := SokidList.GetItem(aData^.Id).Currency;
-      if (Currency <> FAutoTradeInfo.OrderCurrency) then
-        LastExch := TMonitorLists.CurrencyCache.GetLastExchange(FAutoTradeInfo.OrderCurrency, Currency);
-      if (LastExch <= 0) then
-      begin
-        aData^.Description := 'Not passed - No Exchange Rate ' + Currency;
-        aData^.IsLocked := True;
-        ShowNotification(aData);
-        TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddError, Self, 'PreExecutionEvaluation', aData^.Description + ', ' + Info);
-        Exit;
-      end;
-
-      Quantity := 0;
-      if (LastPrice > 0) and (LastExch > 0) then
-      begin
-        if (FAutoTradeInfo.TotalOrderAmount < LastPrice) then
+      TPublishers.LogPublisher.Write([ltLogWriter], ddText, 'PreExecutionEvaluation', log_prefix + 'Proceeding with calculated quantity: ' + IntToStr(calc_quantity));
+      TThread.Synchronize(nil,
+        procedure
         begin
-          aData^.Description := 'Not passed - No Total Money';
-          aData^.IsLocked := True;
-          ShowNotification(aData, 'No Total Money');
-          Exit;
-        end;
-
-        if (FAutoTradeInfo.TotalOrderAmount >= FAutoTradeInfo.OrderAmount) then
-          OrderAmount := FAutoTradeInfo.OrderAmount
-        else
-          OrderAmount := FAutoTradeInfo.TotalOrderAmount;
-
-        {if (OrderAmount <= 0) then
-        begin
-          aData^.Description := 'Not passed - OrderAmount Is 0';
-          aData^.IsLocked := True;
-          ShowNotification(aData, 'OrderAmount is 0');
-          TPublishers.LogPublisher.Write([ltLogWriter], ddWarning, 'PreExecutionEvaluation', 'OrderAmount=0');
-        end;}
-
-        if (aData^.Multiplier > 0) then
-          Quantity := Trunc((OrderAmount * LastExch / (LastPrice * aData^.Multiplier)))
-        else
-          Quantity := Trunc((OrderAmount * LastExch) / LastPrice);
-
-        PrecSettings := TOrderUtils.CheckPrecautionarySettings(aData^.SecurityType, Quantity, LastPrice);
-        for var PrecSetting in PrecSettings do
-          try
-            case PrecSetting of
-              psAlgorithmTotalValueLimit:
-                ;
-              psNumberOfTicks:
-                ;
-              psPercentage:
-                ;
-              psTotalValueLimit:
-                ;
-              psAlgorithmSizeLimit:
-                ;
-              psOrderQuantityMax:
-                Quantity := Trunc(General.PrecautionarySettings[aData^.SecurityType][psOrderQuantityMax]);
-              psMaxAllowedPrice, psMinAllowedPrice:
-                begin
-                  aData^.Description := 'Not passed - ' + PrecSetting.ToString;
-                  aData^.IsLocked := True;
-                  ShowNotification(aData, PrecSetting.ToString);
-                  Exit;
-                end;
-            end;
-          finally
-            TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddWarning, Self, 'PreExecutionEvaluation', PrecSetting.ToString);
-          end;
-        Dec(FAutoTradeInfo.TotalOrderAmount, Trunc(Quantity * LastPrice));
-      end;
-
-      if (Quantity = 0) then
-      begin
-        aData^.Description := 'Not passed - Trade limit overdue';
-        aData^.IsLocked := True;
-        ShowNotification(aData, 'Trade limit overdue');
-        TPublishers.LogPublisher.Write([ltLogWriter, ltLogView, ltActivityLog], ddError, Self, 'PreExecutionEvaluation', aData^.Description + ', ' + Info);
-      end
-      else
-      begin
-        TThread.Synchronize(nil,
-          procedure
-          begin
-            if FMonitor.CreateTemplateStructure(FAutoTradeInfo.OrderGroupId,
-                                                aData,
-                                                TAutoTradesCommon.Create(Quantity,
-                                                                         FAutoTradeInfo.QualifierInstance,
-                                                                         FAutoTradeInfo.Qualifier.RecordId,
-                                                                         FAutoTradeInfo.InstanceNum,
+          if FMonitor.CreateTemplateStructure(FAutoTradeInfo.OrderGroupId,
+                                              aData,
+                                              TAutoTradesCommon.Create(calc_quantity, // Use new calc_quantity
+                                                                       FAutoTradeInfo.QualifierInstance,
+                                                                       FAutoTradeInfo.Qualifier.RecordId,
+                                                                       FAutoTradeInfo.InstanceNum,
                                                                          FAutoTradeInfo.RecordId,
                                                                          FAutoTradeInfo.AllowSendDuplicateOrder,
                                                                          0)) <> nil then
             begin
-              if aData^.IsLocked then
-                CreatedOrdersCount := CreatedOrdersCount + 1;
-              aData^.Name := aData^.Name + ': ' + SimpleRoundTo(aData^.ExtraColumns.RankingSum, -2).ToString;
-            end;
+              if not aData^.IsLocked then // Check if it was not locked before successfully creating structure
+              begin
+                Inc(CreatedOrdersCount); // Increment only for successfully processed new orders
+                aData^.IsLocked := True; // Lock after processing to prevent duplicates by this autotrade instance
+                TPublishers.LogPublisher.Write([ltLogWriter], ddInfo, 'PreExecutionEvaluation', log_prefix + 'Order structure created. CreatedOrdersCount incremented to: ' + CreatedOrdersCount.ToString + '. Instrument locked.');
+              end
+              else
+                TPublishers.LogPublisher.Write([ltLogWriter], ddInfo, 'PreExecutionEvaluation', log_prefix + 'Order structure created for already locked instrument. CreatedOrdersCount not incremented.');
+
+              aData^.Name := aData^.Name + ': ' + SimpleRoundTo(aData^.ExtraColumns.RankingSum, -2).ToString; // Existing logic
+            end
+            else
+              TPublishers.LogPublisher.Write([ltLogWriter], ddError, 'PreExecutionEvaluation', log_prefix + 'FMonitor.CreateTemplateStructure returned nil. Order not created.');
           end);
-      end;
     end;
+    // This block was outside the "if (calc_quantity <= 0) then" else, moving it to be always called if the main criteria are met.
     CheckTradesState;
     AutoTradeInfoToGUI;
+  end // End of "if aData^.IsCriteria and (FAutoTradeInfo.Active...)"
+  else
+  begin
+    // Existing logic for when initial criteria are not met
+    if not (aData^.IsCriteria) then
+       TPublishers.LogPublisher.Write([ltLogWriter], ddDebug, 'PreExecutionEvaluation', log_prefix + 'Skipped: Data not meeting criteria.')
+    else if not (FAutoTradeInfo.Active) then
+       TPublishers.LogPublisher.Write([ltLogWriter], ddDebug, 'PreExecutionEvaluation', log_prefix + 'Skipped: AutoTradeInfo not active.')
+    else if (aData^.IsLocked and not FAutoTradeInfo.AllowSendDuplicateOrder) then // Corrected logic for AllowSendDuplicateOrder
+       TPublishers.LogPublisher.Write([ltLogWriter], ddDebug, 'PreExecutionEvaluation', log_prefix + 'Skipped: Instrument locked and AllowSendDuplicateOrder is false.')
+    else if (CreatedOrdersCount >= FAutoTradeInfo.MaxNumberOrder) then
+       TPublishers.LogPublisher.Write([ltLogWriter], ddDebug, 'PreExecutionEvaluation', log_prefix + 'Skipped: CreatedOrdersCount >= MaxNumberOrder.');
+    // else conditions for original FAutoTradeInfo.OrderAmount and TotalOrderAmount were removed, covered by new logic
+
+    CheckTradesState; // Still call this
+    AutoTradeInfoToGUI; // Still call this
   end;
 end;
 

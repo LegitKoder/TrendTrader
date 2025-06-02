@@ -16,7 +16,7 @@ uses
   FireDAC.Comp.Client, FireDAC.Stan.Param, FireDAC.DatS, FireDAC.DApt.Intf,
   FireDAC.DApt, FireDAC.Comp.DataSet, FireDAC.Phys.IBBase,
   FireDAC.Comp.ScriptCommands, FireDAC.Stan.Util, FireDAC.Comp.Script,
-  FireDAC.Phys.IBWrapper;
+  FireDAC.Phys.IBWrapper, Quantities.Types; // Added Quantities.Types
 {$ENDREGION}
 
 type
@@ -293,6 +293,10 @@ begin
   CreateNewField('CANDIDATES', 'REPEAT_INSTRUMENTS', 'BOOLEAN', 'FALSE');
   CreateNewField('ORDERS', 'IS_ACTIVE_TIME', 'BOOLEAN', 'FALSE');
   CreateNewField('ORDERS', 'ACTIVE_TIME', 'INTEGER', '0');
+
+  // Add new fields to QUANTITIES table
+  CreateNewField('QUANTITIES', 'MODE', 'INTEGER', Ord(TQuantityMode.qmFixedShares).ToString);
+  CreateNewField('QUANTITIES', 'RISK_OR_PERCENT_VALUE', 'DOUBLE PRECISION', '0.0');
 
   CreateObject('TICK_TYPES', C_SQL_CREATE_TICK_TYPES, rtTable, ConnectionFeed);
 

@@ -3,7 +3,7 @@ object frmQuantityEdit: TfrmQuantityEdit
   Top = 0
   BorderStyle = bsDialog
   Caption = 'Quantity'
-  ClientHeight = 239
+  ClientHeight = 300
   ClientWidth = 356
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
@@ -21,7 +21,7 @@ object frmQuantityEdit: TfrmQuantityEdit
   TextHeight = 13
   object pnlBottom: TPanel
     Left = 0
-    Top = 194
+    Top = 255
     Width = 356
     Height = 45
     Align = alBottom
@@ -70,13 +70,13 @@ object frmQuantityEdit: TfrmQuantityEdit
     Left = 0
     Top = 0
     Width = 356
-    Height = 194
+    Height = 255
     Align = alClient
     BevelOuter = bvNone
     TabOrder = 1
     DesignSize = (
       356
-      194)
+      255)
     object lblName: TLabel
       Left = 17
       Top = 7
@@ -91,9 +91,37 @@ object frmQuantityEdit: TfrmQuantityEdit
       Font.Style = []
       ParentFont = False
     end
-    object lblSingleOrderAmount: TLabel
+    object lblQuantityMode: TLabel
       Left = 17
       Top = 105
+      Width = 80
+      Height = 16
+      Alignment = taRightJustify
+      Caption = 'Sizing Mode:'
+      Font.Charset = DEFAULT_CHARSET
+      Font.Color = clWindowText
+      Font.Height = -13
+      Font.Name = 'Tahoma'
+      Font.Style = []
+      ParentFont = False
+    end
+    object lblRiskOrPercentValue: TLabel
+      Left = 17
+      Top = 151
+      Width = 120
+      Height = 16
+      Alignment = taRightJustify
+      Caption = 'Risk/Percent Value:'
+      Font.Charset = DEFAULT_CHARSET
+      Font.Color = clWindowText
+      Font.Height = -13
+      Font.Name = 'Tahoma'
+      Font.Style = []
+      ParentFont = False
+    end
+    object lblSingleOrderAmount: TLabel
+      Left = 17
+      Top = 197
       Width = 122
       Height = 16
       Alignment = taRightJustify
@@ -121,7 +149,7 @@ object frmQuantityEdit: TfrmQuantityEdit
     end
     object lblCurrency: TLabel
       Left = 17
-      Top = 151
+      Top = 243
       Width = 56
       Height = 16
       Alignment = taRightJustify
@@ -144,7 +172,7 @@ object frmQuantityEdit: TfrmQuantityEdit
     object edTotalOrderAmount: TNumberBox
       Left = 17
       Top = 78
-      Width = 65
+      Width = 120
       Height = 21
       AcceptExpressions = True
       TabOrder = 1
@@ -152,24 +180,44 @@ object frmQuantityEdit: TfrmQuantityEdit
       UseMouseWheel = True
       NegativeValueColor = clRed
     end
-    object edSingleOrderAmount: TNumberBox
+    object cbQuantityMode: TComboBox
       Left = 17
       Top = 127
-      Width = 65
+      Width = 180
+      Height = 21
+      Style = csDropDownList
+      TabOrder = 2
+    end
+    object edRiskOrPercentValue: TNumberBox
+      Left = 17
+      Top = 173
+      Width = 120
       Height = 21
       AcceptExpressions = True
-      TabOrder = 2
+      ValueType = vtFloat
+      TabOrder = 3
+      SpinButtonOptions.Placement = nbspCompact
+      UseMouseWheel = True
+      NegativeValueColor = clRed
+    end
+    object edSingleOrderAmount: TNumberBox
+      Left = 17
+      Top = 219
+      Width = 120
+      Height = 21
+      AcceptExpressions = True
+      TabOrder = 4
       SpinButtonOptions.Placement = nbspCompact
       UseMouseWheel = True
       NegativeValueColor = clRed
     end
     object cbOrderCurrency: TComboBox
       Left = 17
-      Top = 169
-      Width = 65
+      Top = 261
+      Width = 120
       Height = 21
       CharCase = ecUpperCase
-      TabOrder = 3
+      TabOrder = 5
     end
   end
   object ActionListMain: TActionList

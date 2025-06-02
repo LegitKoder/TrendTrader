@@ -14,12 +14,20 @@ uses
 {$ENDREGION}
 
 type
+  TQuantityMode = (qmFixedShares, qmFixedMonetaryAmount, qmPercentOfEquity, qmFixedRiskPercentEquity);
+
+  TQuantityModeHelper = record helper for TQuantityMode
+    function ToString: string;
+  end;
+
   PQuantity = ^TQuantity;
   TQuantity = class(TBaseClass)
   private
     FCurrency: string;
     FOrderAmount: Integer;
     FTotalOrderAmount: Integer;
+    FMode: TQuantityMode;
+    FRiskOrPercentValue: Double;
   public
     function ToString: string; override;
     function ToValueString: string;
@@ -36,9 +44,25 @@ type
     property Currency         : string               read FCurrency         write FCurrency;
     property OrderAmount      : Integer              read FOrderAmount      write FOrderAmount;
     property TotalOrderAmount : Integer              read FTotalOrderAmount write FTotalOrderAmount;
+    property Mode             : TQuantityMode        read FMode             write FMode;
+    property RiskOrPercentValue: Double              read FRiskOrPercentValue write FRiskOrPercentValue;
   end;
 
 implementation
+
+{ TQuantityModeHelper }
+
+function TQuantityModeHelper.ToString: string;
+begin
+  case Self of
+    qmFixedShares: Result := 'Fixed Shares';
+    qmFixedMonetaryAmount: Result := 'Fixed Monetary Amount';
+    qmPercentOfEquity: Result := 'Percent Of Equity';
+    qmFixedRiskPercentEquity: Result := 'Fixed Risk Percent Equity';
+  else
+    Result := '';
+  end;
+end;
 
 { TQuantity }
 
@@ -50,6 +74,8 @@ begin
   Self.Currency         := aQuantity.Currency;
   Self.OrderAmount      := aQuantity.OrderAmount;
   Self.TotalOrderAmount := aQuantity.TotalOrderAmount;
+  Self.Mode             := aQuantity.Mode;
+  Self.RiskOrPercentValue := aQuantity.RiskOrPercentValue;
 end;
 
 procedure TQuantity.Clear;
@@ -59,6 +85,8 @@ begin
   Self.Currency         := '';
   Self.OrderAmount      := 0;
   Self.TotalOrderAmount := 0;
+  Self.Mode             := qmFixedShares; // Default mode
+  Self.RiskOrPercentValue := 0.0;
 end;
 
 constructor TQuantity.Create;
@@ -96,6 +124,8 @@ begin
         Self.Currency         := Query.FieldByName('CURRENCY').AsString;
         Self.OrderAmount      := Query.FieldByName('ORDER_AMOUNT').AsInteger;
         Self.TotalOrderAmount := Query.FieldByName('TOTAL_ORDER_AMOUNT').AsInteger;
+        Self.Mode             := TQuantityMode(Query.FieldByName('MODE').AsInteger);
+        Self.RiskOrPercentValue := Query.FieldByName('RISK_OR_PERCENT_VALUE').AsFloat;
       end;
       Self.RecordId := aID;
     finally
@@ -118,11 +148,12 @@ procedure TQuantity.SaveToDB;
 resourcestring
   C_SQL_EXISTS_TEXT = 'SELECT COUNT(*) AS CNT FROM QUANTITIES WHERE ID=:ID';
   C_SQL_UPDATE_TEXT = 'UPDATE QUANTITIES SET NAME=:NAME, CURRENCY=:CURRENCY,' + sLineBreak +
-                                            'ORDER_AMOUNT=:ORDER_AMOUNT, TOTAL_ORDER_AMOUNT=:TOTAL_ORDER_AMOUNT' + sLineBreak +
+                                            'ORDER_AMOUNT=:ORDER_AMOUNT, TOTAL_ORDER_AMOUNT=:TOTAL_ORDER_AMOUNT,' + sLineBreak +
+                                            'MODE=:MODE, RISK_OR_PERCENT_VALUE=:RISK_OR_PERCENT_VALUE' + sLineBreak +
                                             'WHERE ID=:ID';
 
-  C_SQL_INSERT_TEXT = 'INSERT INTO QUANTITIES ( ID, NAME, CURRENCY, ORDER_AMOUNT, TOTAL_ORDER_AMOUNT)' + sLineBreak +
-                                     ' VALUES (:ID,:NAME,:CURRENCY,:ORDER_AMOUNT,:TOTAL_ORDER_AMOUNT)';
+  C_SQL_INSERT_TEXT = 'INSERT INTO QUANTITIES ( ID, NAME, CURRENCY, ORDER_AMOUNT, TOTAL_ORDER_AMOUNT, MODE, RISK_OR_PERCENT_VALUE)' + sLineBreak +
+                                     ' VALUES (:ID,:NAME,:CURRENCY,:ORDER_AMOUNT,:TOTAL_ORDER_AMOUNT, :MODE, :RISK_OR_PERCENT_VALUE)';
 var
   Query: TFDQuery;
   IsExists: Boolean;
@@ -166,6 +197,8 @@ begin
     Query.ParamByName('CURRENCY').AsString            := Self.Currency;
     Query.ParamByName('ORDER_AMOUNT').AsInteger       := Self.OrderAmount;
     Query.ParamByName('TOTAL_ORDER_AMOUNT').AsInteger := Self.TotalOrderAmount;
+    Query.ParamByName('MODE').AsInteger               := Ord(Self.Mode);
+    Query.ParamByName('RISK_OR_PERCENT_VALUE').AsFloat := Self.RiskOrPercentValue;
 
     try
       Query.Prepare;
